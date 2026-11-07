@@ -24,6 +24,8 @@ for ARCH in "${ARCHS[@]}"; do
 done
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 if [[ ${#ARCHS[@]} == 2 ]]; then lipo -create "$BUILD/tessera-arm64" "$BUILD/tessera-x86_64" -output "$APP/Contents/MacOS/Tessera"; else cp "$BUILD/tessera-${ARCHS[0]}" "$APP/Contents/MacOS/Tessera"; fi
+# Replace generated resources so obsolete hashed bundles never ship.
+rm -rf -- "$APP/Contents/Resources/web"
 cp -R "$BUILD/web" "$APP/Contents/Resources/"
 cp "$ROOT/macos/Info.plist" "$APP/Contents/Info.plist"
 cp "$ROOT/app/src-tauri/icons/icon.png" "$APP/Contents/Resources/icon.png"
