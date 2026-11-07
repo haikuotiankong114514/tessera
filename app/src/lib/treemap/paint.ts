@@ -27,8 +27,6 @@ import type { Box, Item, Painter, PaintState } from './engine';
 import { NONE, type BoxBatch, type RGBA } from './gpu';
 
 export const UI_FONT = '"Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "PingFang SC", "Noto Sans SC", system-ui, sans-serif';
-const F_REG = `400 12px ${UI_FONT}`;
-const F_SEMI = `600 12px ${UI_FONT}`;
 
 const LABEL_MIN_W = 44;
 const LINE = 16;
@@ -79,7 +77,13 @@ export const textFit = new TextFit();
 type Pat = { pat: CanvasPattern; size: number };
 
 export class FluentPainter implements Painter {
-  readonly light = LIGHT_R;
+  private readonly regularFont: string;
+  private readonly semiboldFont: string;
+
+  constructor(font = UI_FONT, readonly light = LIGHT_R) {
+    this.regularFont = `400 12px ${font}`;
+    this.semiboldFont = `600 12px ${font}`;
+  }
   private pats = new Map<string, Pat>();
   private batches = new Map<string, Path2D>();
   /** folder outline per depth, per scheme */
@@ -342,10 +346,10 @@ export class FluentPainter implements Painter {
     }
 
     /* ---------- pass 6: pointer light on nearby tile edges ---------- */
-    if (S.mouse.in) {
+    if (S.mouse.in && this.light > 0) {
       const mx = S.mouse.x;
       const my = S.mouse.y;
-      const R = LIGHT_R;
+      const R = this.light;
       const g = ctx.createRadialGradient(mx, my, 0, mx, my, R);
       g.addColorStop(0, t['tm-reveal']);
       g.addColorStop(1, 'rgba(0,0,0,0)');
@@ -374,18 +378,18 @@ export class FluentPainter implements Painter {
       lockGlyph(ctx, x, b.y + r.header / 2 - 5.5, t['text-3']);
       x += 15;
     }
-    ctx.font = F_REG;
+    ctx.font = this.regularFont;
     const sz = fmtBytes(r.size);
     const sw = textFit.measure(ctx, sz);
     const showSize = b.w > sw + 96;
-    ctx.font = F_SEMI;
+    ctx.font = this.semiboldFont;
     const nm = textFit.fit(ctx, r.name, b.x + b.w - x - 8 - (showSize ? sw + 10 : 0));
     if (nm) {
       ctx.fillStyle = t['tm-folder-text'];
       ctx.fillText(nm, x, base);
     }
     if (showSize) {
-      ctx.font = F_REG;
+      ctx.font = this.regularFont;
       ctx.fillStyle = t['text-3'];
       ctx.fillText(sz, b.x + b.w - sw - 8, base);
     }
@@ -393,13 +397,13 @@ export class FluentPainter implements Painter {
 
   private label(ctx: CanvasRenderingContext2D, name: string, size: string, b: { x: number; y: number; w: number; h: number }, ink: string, ink2: string) {
     const px = 7;
-    ctx.font = F_REG;
+    ctx.font = this.regularFont;
     const nm = textFit.fit(ctx, name, b.w - px * 2);
     if (!nm) return;
     ctx.fillStyle = ink;
     ctx.fillText(nm, b.x + px, b.y + 16);
     if (b.h >= 16 + LINE + 6) {
-      ctx.font = F_SEMI;
+      ctx.font = this.semiboldFont;
       const s = textFit.fit(ctx, size, b.w - px * 2);
       if (s) {
         ctx.fillStyle = ink2;
@@ -429,13 +433,13 @@ export class FluentPainter implements Painter {
     ctx.setLineDash([]);
     if (b.w >= 60 && b.h >= 22) {
       const name = free ? tr('free') : tr('unscanned');
-      ctx.font = F_SEMI;
+      ctx.font = this.semiboldFont;
       const nm = textFit.fit(ctx, name, b.w - 16);
       if (!nm) return;
       ctx.fillStyle = free ? t.accent : t['text-2'];
       ctx.fillText(nm, b.x + 8, b.y + 17);
       if (b.h >= 40) {
-        ctx.font = F_REG;
+        ctx.font = this.regularFont;
         ctx.fillStyle = t['text-3'];
         ctx.fillText(textFit.fit(ctx, fmtBytes(it.r.size), b.w - 16), b.x + 8, b.y + 17 + LINE);
       }

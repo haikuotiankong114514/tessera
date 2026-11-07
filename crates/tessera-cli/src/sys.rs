@@ -48,7 +48,7 @@ pub fn cpu_time() -> Duration {
     Duration::from_nanos((ticks(k) + ticks(u)) * 100)
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn memory() -> Memory {
     // Development fallback (Linux): read /proc/self/status.
     let s = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
@@ -66,7 +66,7 @@ pub fn memory() -> Memory {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn cpu_time() -> Duration {
     // utime + stime from /proc/self/stat, in clock ticks (assume 100 Hz).
     let s = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
@@ -79,4 +79,37 @@ pub fn cpu_time() -> Duration {
     // is dropped by the filter, so utime (field 14) and stime (15) land at 10 and 11.
     let ticks = f.get(10).copied().unwrap_or(0) + f.get(11).copied().unwrap_or(0);
     Duration::from_millis(ticks * 10)
+}
+
+#[cfg(target_os = "macos")]
+fn usage() -> libc::rusage_info_v2 {
+    let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::proc_pid_rusage(
+            libc::getpid(),
+            libc::RUSAGE_INFO_V2,
+            (&mut info as *mut libc::rusage_info_v2).cast(),
+        );
+    }
+    info
+}
+
+#[cfg(target_os = "macos")]
+pub fn memory() -> Memory {
+    let info = usage();
+    let mut peak: libc::rusage = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::getrusage(libc::RUSAGE_SELF, &mut peak);
+    }
+    Memory {
+        working_set: info.ri_resident_size,
+        peak_working_set: peak.ru_maxrss.max(0) as u64,
+        private_bytes: info.ri_phys_footprint,
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn cpu_time() -> Duration {
+    let info = usage();
+    Duration::from_nanos(info.ri_user_time.saturating_add(info.ri_system_time))
 }

@@ -13,12 +13,16 @@
 //! may sample (e.g. every 100 ms) while the scan runs. Nothing polls after
 //! the scan ends.
 
+#[cfg(not(target_os = "macos"))]
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
+#[cfg(not(target_os = "macos"))]
 use crate::{Result, SharedTree};
 
+#[cfg(target_os = "macos")]
+pub mod darwin;
 pub mod mft;
 #[cfg(windows)]
 pub mod walk;
@@ -182,7 +186,7 @@ pub fn scan(
     Ok(summary)
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn scan(
     _root: &Path,
     _opts: &ScanOptions,
@@ -254,9 +258,12 @@ pub fn volume_info(path: &Path) -> Result<VolumeInfo> {
     })
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn volume_info(_path: &Path) -> Result<VolumeInfo> {
     Err(crate::Error::Unsupported(
         "volume info is only implemented on Windows",
     ))
 }
+
+#[cfg(target_os = "macos")]
+pub use darwin::{scan, volume_info};

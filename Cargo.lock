@@ -3203,6 +3203,7 @@ dependencies = [
 name = "tessera-cli"
 version = "1.0.1"
 dependencies = [
+ "libc",
  "tessera-core",
  "windows",
 ]
@@ -3211,9 +3212,20 @@ dependencies = [
 name = "tessera-core"
 version = "1.0.1"
 dependencies = [
+ "libc",
  "rayon",
  "windows",
  "windows-core",
+]
+
+[[package]]
+name = "tessera-macos"
+version = "0.1.0-beta.1"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "tessera-core",
 ]
 
 [[package]]

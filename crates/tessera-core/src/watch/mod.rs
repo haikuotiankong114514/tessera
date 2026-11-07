@@ -36,6 +36,8 @@
 
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(target_os = "macos")]
+use std::sync::PoisonError;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
@@ -46,6 +48,8 @@ use crate::{NodeId, Result, SharedTree};
 
 mod apply;
 mod coalesce;
+#[cfg(target_os = "macos")]
+pub mod darwin;
 mod rdcw;
 #[cfg(windows)]
 mod sys;
@@ -65,6 +69,9 @@ pub enum WatchBackend {
     Auto,
     /// `ReadDirectoryChangesExW` / `ReadDirectoryChangesW` on the root.
     DirectoryChanges,
+    /// macOS FSEvents, with dirty directory reconciliation.
+    #[cfg(target_os = "macos")]
+    FsEvents,
     /// The NTFS USN change journal (needs admin rights, an index of the
     /// tree's file reference numbers and a checkpoint).
     UsnJournal,
@@ -209,6 +216,10 @@ pub(crate) fn run_applier(
 
 /// A running watcher. Dropping it stops it, like [`Watcher::stop`].
 pub struct Watcher {
+    #[cfg(target_os = "macos")]
+    darwin_stream: Option<darwin::Stream>,
+    #[cfg(target_os = "macos")]
+    darwin_requests: Option<Sender<Option<std::path::PathBuf>>>,
     backend: WatchBackend,
     stop: Arc<AtomicBool>,
     progress: Arc<ScanProgress>,
@@ -353,7 +364,7 @@ impl Watcher {
     }
 
     /// Live updates are only implemented on Windows.
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     pub fn start(
         _root: &Path,
         _tree: SharedTree,
@@ -364,6 +375,122 @@ impl Watcher {
         Err(crate::Error::Unsupported(
             "live updates are only implemented on Windows",
         ))
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn start(
+        root: &Path,
+        tree: SharedTree,
+        opts: WatchOptions,
+        _usn: Option<(FrnIndex, UsnCheckpoint)>,
+        on_batch: impl Fn(&BatchReport) + Send + 'static,
+    ) -> Result<Watcher> {
+        if opts.backend == WatchBackend::UsnJournal {
+            return Err(crate::Error::Unsupported("USN is Windows-only"));
+        }
+        let logical_root = tree
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .path(NodeId::ROOT);
+        let root = std::fs::canonicalize(root)?;
+        let (tx, rx) = std::sync::mpsc::channel::<Option<std::path::PathBuf>>();
+        let sender = tx.clone();
+        let base = root.clone();
+        let mapped_root = logical_root.clone();
+        let stream = darwin::Stream::new(&root, move |path, flags| {
+            let path = if flags & (1 | 2 | 4 | 8 | 32 | 128) != 0 {
+                None
+            } else {
+                let mut path = path.to_path_buf();
+                if let Ok(rel) = path.strip_prefix(&base) {
+                    path = mapped_root.join(rel);
+                }
+                Some(path.parent().unwrap_or(&path).to_path_buf())
+            };
+            let _ = sender.send(path);
+        })?;
+        let root = logical_root;
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let throttle = Arc::new(Throttle::new(opts.throttle));
+        let pace = throttle.clone();
+        let progress = Arc::new(ScanProgress::new());
+        let collector = std::thread::Builder::new()
+            .name("tessera-fsevents-apply".into())
+            .spawn(move || {
+                while let Ok(first) = rx.recv() {
+                    if thread_stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let until = Instant::now() + pace.get();
+                    let mut dirty = std::collections::HashSet::new();
+                    let mut full = first.is_none();
+                    if let Some(path) = first {
+                        dirty.insert(path);
+                    }
+                    while let Some(left) = until.checked_duration_since(Instant::now()) {
+                        match rx.recv_timeout(left) {
+                            Ok(Some(path)) => {
+                                dirty.insert(path);
+                            }
+                            Ok(None) => full = true,
+                            Err(_) => break,
+                        }
+                    }
+                    if thread_stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let mut report = BatchReport {
+                        events: dirty.len(),
+                        ..Default::default()
+                    };
+                    if full {
+                        let replacement = crate::Tree::for_path(&root).into_shared();
+                        match crate::scan::scan(
+                            &root,
+                            &crate::scan::ScanOptions::default(),
+                            &replacement,
+                            &ScanProgress::new(),
+                        ) {
+                            Ok(_) => {
+                                let replacement = Arc::try_unwrap(replacement)
+                                    .ok()
+                                    .unwrap()
+                                    .into_inner()
+                                    .unwrap_or_else(PoisonError::into_inner);
+                                *tree.write().unwrap_or_else(PoisonError::into_inner) = replacement;
+                                report.applied = 1;
+                            }
+                            Err(e) => report.error = Some(e.to_string()),
+                        }
+                    } else {
+                        for path in dirty {
+                            if !path.starts_with(&root) {
+                                continue;
+                            }
+                            match crate::scan::darwin::refresh(&tree, &path) {
+                                Ok(true) => report.applied += 1,
+                                Ok(false) => {}
+                                Err(e) => report.error = Some(e.to_string()),
+                            }
+                        }
+                    }
+                    if !report.is_empty() {
+                        on_batch(&report);
+                    }
+                }
+            })?;
+        Ok(Watcher {
+            backend: WatchBackend::FsEvents,
+            stop,
+            progress,
+            throttle,
+            requests: None,
+            collector: Some(collector),
+            applier: None,
+            darwin_stream: Some(stream),
+            darwin_requests: Some(tx),
+        })
     }
 
     /// The backend actually in use (never `Auto`).
@@ -394,6 +521,11 @@ impl Watcher {
     /// marked deleted and it is scanned again. The result arrives in a batch
     /// report like any change. Use it for [`BatchReport::rescan_needed`].
     pub fn rescan(&self, dir: NodeId) {
+        #[cfg(target_os = "macos")]
+        if let Some(tx) = &self.darwin_requests {
+            let _ = dir;
+            let _ = tx.send(None);
+        }
         if let Some(tx) = &self.requests {
             let _ = tx.send(vec![Event::Rescan(dir)]);
         }
@@ -408,6 +540,11 @@ impl Watcher {
     fn shutdown(&mut self) {
         self.stop.store(true, Ordering::Release);
         self.progress.cancel();
+        #[cfg(target_os = "macos")]
+        {
+            self.darwin_stream.take();
+            self.darwin_requests.take();
+        }
         #[cfg(windows)]
         self.wake.set();
         if let Some(h) = self.collector.take() {
@@ -638,7 +775,7 @@ mod tests {
         h.stop.store(true, Ordering::Release);
     }
 
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     #[test]
     fn start_is_unsupported_off_windows() {
         let tree = crate::Tree::new(b"/").into_shared();

@@ -191,6 +191,11 @@ impl Tree {
         entries.par_sort_unstable_by_key(|e| (e.parent, e.rec, e.name_off));
 
         let mut tree = Tree {
+            posix_paths: false,
+            #[cfg(target_os = "macos")]
+            identities: Vec::new(),
+            #[cfg(target_os = "macos")]
+            hardlinks: Default::default(),
             nodes: ChunkedVec::new(),
             names,
             changed: 0,

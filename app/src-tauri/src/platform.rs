@@ -26,6 +26,8 @@ pub struct Info {
     pub lang: &'static str,
     /// BCP 47 tag for formatting dates and numbers, e.g. "en-GB"
     pub locale: String,
+    #[cfg(target_os = "macos")]
+    pub benchmark_root: Option<String>,
 }
 
 impl Info {
@@ -35,9 +37,11 @@ impl Info {
             backdrop,
             accent: imp::accent(),
             version,
-            core: cfg!(windows),
+            core: cfg!(any(windows, target_os = "macos")),
             lang: crate::i18n::lang().id(),
             locale: crate::i18n::choice().locale.clone(),
+            #[cfg(target_os = "macos")]
+            benchmark_root: std::env::var("TESSERA_BENCH_ROOT").ok(),
         }
     }
 }

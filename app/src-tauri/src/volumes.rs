@@ -14,6 +14,42 @@ pub struct Volume {
 
 /// Fixed and removable drives that have a file system, in drive-letter order.
 pub fn list() -> Vec<Volume> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut roots = vec!["/".to_string()];
+        if let Ok(entries) = std::fs::read_dir("/Volumes") {
+            roots.extend(
+                entries
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path().to_string_lossy().into_owned()),
+            );
+        }
+        let mut volumes: Vec<_> = roots
+            .into_iter()
+            .filter_map(|root| describe(&root))
+            .collect();
+        if let Ok(root) = std::env::var("TESSERA_BENCH_ROOT") {
+            let path = std::path::Path::new(&root);
+            if path.is_dir() && !volumes.iter().any(|v| v.root == root) {
+                if let Ok(info) = tessera_core::scan::volume_info(path) {
+                    let label = path
+                        .file_name()
+                        .unwrap_or(path.as_os_str())
+                        .to_string_lossy()
+                        .into_owned();
+                    volumes.push(Volume {
+                        root,
+                        label,
+                        fs: info.file_system,
+                        capacity: info.total_bytes,
+                        free: info.free_bytes,
+                    });
+                }
+            }
+        }
+        return volumes;
+    }
+    #[cfg(not(target_os = "macos"))]
     imp::letters()
         .into_iter()
         .filter_map(|c| describe(&format!("{c}:\\")))
@@ -83,7 +119,7 @@ mod imp {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 mod imp {
     use super::Volume;
 
@@ -93,5 +129,34 @@ mod imp {
 
     pub fn describe(_root: &str) -> Option<Volume> {
         None
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod imp {
+    use super::Volume;
+    pub fn describe(root: &str) -> Option<Volume> {
+        use std::os::unix::fs::MetadataExt;
+        let path = std::path::Path::new(root);
+        if root != "/" && path.parent() != Some(std::path::Path::new("/Volumes")) {
+            return None;
+        }
+        if root != "/"
+            && std::fs::metadata(path).ok()?.dev() == std::fs::metadata("/Volumes").ok()?.dev()
+        {
+            return None;
+        }
+        let info = tessera_core::scan::volume_info(path).ok()?;
+        Some(Volume {
+            root: root.into(),
+            label: if root == "/" {
+                "Macintosh HD".into()
+            } else {
+                path.file_name()?.to_string_lossy().into_owned()
+            },
+            fs: info.file_system,
+            capacity: info.total_bytes,
+            free: info.free_bytes,
+        })
     }
 }

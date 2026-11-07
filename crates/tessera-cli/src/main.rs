@@ -143,23 +143,33 @@ fn run_scan(args: &Args, show_progress: bool) -> Result<(SharedTree, ScanSummary
         mode: args.mode,
         threads: args.threads,
     };
+    if !show_progress {
+        return scan::scan(&args.path, &opts, &tree, &progress)
+            .map(|summary| (tree, summary))
+            .map_err(|e| e.to_string());
+    }
+    let (done, completion) = std::sync::mpsc::sync_channel(1);
     let worker = {
         let (tree, progress, path) = (tree.clone(), progress.clone(), args.path.clone());
-        std::thread::spawn(move || scan::scan(&path, &opts, &tree, &progress))
+        std::thread::spawn(move || {
+            let result = scan::scan(&path, &opts, &tree, &progress);
+            let _ = done.send(());
+            result
+        })
     };
     let start = Instant::now();
-    while !worker.is_finished() {
-        std::thread::park_timeout(Duration::from_millis(500));
-        if show_progress && !worker.is_finished() {
-            let p = progress.snapshot();
-            eprint!(
-                "\r  {:>6.1}s  {:>10} files  {:>9} dirs  {:>10}",
-                start.elapsed().as_secs_f64(),
-                p.files,
-                p.dirs,
-                human(p.bytes)
-            );
-        }
+    while matches!(
+        completion.recv_timeout(Duration::from_millis(500)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ) {
+        let p = progress.snapshot();
+        eprint!(
+            "\r  {:>6.1}s  {:>10} files  {:>9} dirs  {:>10}",
+            start.elapsed().as_secs_f64(),
+            p.files,
+            p.dirs,
+            human(p.bytes)
+        );
     }
     if show_progress {
         eprint!("\r{:72}\r", "");

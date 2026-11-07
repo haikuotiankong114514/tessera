@@ -21,6 +21,8 @@ export interface PlatformInfo {
   lang: string;
   /** BCP 47 tag for dates and numbers, e.g. en-GB */
   locale: string;
+  /** Optional macOS comparison-build scan root. */
+  benchmarkRoot?: string | null;
 }
 
 export interface Volume {

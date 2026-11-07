@@ -433,6 +433,10 @@ pub struct EntryBatch {
 
 #[derive(Clone, Copy, Debug)]
 pub struct BatchEntry {
+    #[cfg(target_os = "macos")]
+    pub(crate) identity: (i32, u64),
+    #[cfg(target_os = "macos")]
+    pub(crate) links: u32,
     pub size: u64,
     pub logical: u64,
     pub flags: NodeFlags,
@@ -492,6 +496,10 @@ impl EntryBatch {
         let len = self.names.len() - start;
         let name_len = u16::try_from(len).expect("name too long");
         self.entries.push(BatchEntry {
+            #[cfg(target_os = "macos")]
+            identity: (0, 0),
+            #[cfg(target_os = "macos")]
+            links: 1,
             size,
             logical,
             flags,
@@ -499,6 +507,14 @@ impl EntryBatch {
             name_start: start as u32,
             name_len,
         });
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn set_last_identity(&mut self, identity: (i32, u64), links: u32) {
+        if let Some(e) = self.entries.last_mut() {
+            e.identity = identity;
+            e.links = links;
+        }
     }
 
     pub fn entries(&self) -> &[BatchEntry] {
@@ -513,6 +529,12 @@ impl EntryBatch {
 
 /// The whole scanned tree.
 pub struct Tree {
+    /// Native POSIX paths; Windows-format synthetic fixtures retain their semantics.
+    pub(crate) posix_paths: bool,
+    #[cfg(target_os = "macos")]
+    pub(crate) identities: Vec<(i32, u64)>,
+    #[cfg(target_os = "macos")]
+    pub(crate) hardlinks: std::collections::HashMap<(i32, u64), Vec<NodeId>>,
     pub(crate) nodes: ChunkedVec<Node>,
     pub(crate) names: NamePool,
     /// See [`Tree::changed_bytes`].
@@ -572,6 +594,11 @@ impl Tree {
     /// path of the scanned root as WTF-8, e.g. `C:\` or `D:\Games`.
     pub fn new(root_name: &[u8]) -> Tree {
         let mut t = Tree {
+            posix_paths: false,
+            #[cfg(target_os = "macos")]
+            identities: Vec::new(),
+            #[cfg(target_os = "macos")]
+            hardlinks: Default::default(),
             nodes: ChunkedVec::new(),
             names: NamePool::with_dedup(),
             changed: 0,
@@ -602,7 +629,12 @@ impl Tree {
         }
         #[cfg(not(windows))]
         {
-            Tree::new(root.to_string_lossy().as_bytes())
+            use std::os::unix::ffi::OsStrExt;
+            let mut tree = Tree::new(root.as_os_str().as_bytes());
+            tree.posix_paths = true;
+            #[cfg(target_os = "macos")]
+            tree.identities.push((0, 0));
+            tree
         }
     }
 
@@ -618,6 +650,14 @@ impl Tree {
     }
 
     #[inline]
+    #[cfg(target_os = "macos")]
+    pub fn native_identity(&self, id: NodeId) -> Option<(i32, u64)> {
+        self.identities
+            .get(id.index())
+            .copied()
+            .filter(|&i| i != (0, 0))
+    }
+
     pub fn root(&self) -> NodeId {
         NodeId::ROOT
     }
@@ -691,8 +731,14 @@ impl Tree {
         }
         let mut out = Vec::with_capacity(128);
         for (i, &n) in chain.iter().rev().enumerate() {
-            if i > 0 && !matches!(out.last(), Some(b'\\') | Some(b'/')) {
-                out.push(b'\\');
+            if i > 0
+                && (if self.posix_paths {
+                    out.last() != Some(&b'/')
+                } else {
+                    !matches!(out.last(), Some(b'\\') | Some(b'/'))
+                })
+            {
+                out.push(if self.posix_paths { b'/' } else { b'\\' });
             }
             out.extend_from_slice(self.name(n));
         }
@@ -718,22 +764,28 @@ impl Tree {
         }
         #[cfg(not(windows))]
         {
-            self.path_lossy(id).into()
+            use std::os::unix::ffi::OsStringExt;
+            std::ffi::OsString::from_vec(self.path_wtf8(id)).into()
         }
     }
 
     /// Finds a live child by name, case-insensitively (as NTFS does).
     /// Linear in the number of children; meant for incremental updates.
     pub fn find_child(&self, parent: NodeId, name: &[u8]) -> Option<NodeId> {
-        self.children(parent)
-            .find(|&c| wtf8::eq_ignore_case(self.name(c), name))
+        self.children(parent).find(|&c| {
+            if self.posix_paths {
+                self.name(c) == name
+            } else {
+                wtf8::eq_ignore_case(self.name(c), name)
+            }
+        })
     }
 
     /// Resolves a path below the root (components separated by `\` or `/`)
     /// to a live node. `rel` is relative to the root, e.g. `Users\me\a.txt`.
     pub fn lookup_relative(&self, rel: &[u8]) -> Option<NodeId> {
         let mut cur = NodeId::ROOT;
-        for comp in rel.split(|&b| b == b'\\' || b == b'/') {
+        for comp in rel.split(|&b| b == b'/' || (!self.posix_paths && b == b'\\')) {
             if comp.is_empty() || comp == b"." {
                 continue;
             }
@@ -762,6 +814,16 @@ impl Tree {
             } else {
                 old_first
             };
+            #[cfg(target_os = "macos")]
+            if self.posix_paths {
+                self.identities.push(e.identity);
+                if e.links > 1 {
+                    self.hardlinks
+                        .entry(e.identity)
+                        .or_default()
+                        .push(NodeId(id));
+                }
+            }
             self.nodes.push(Node {
                 size: e.size,
                 logical: e.logical,
@@ -923,10 +985,27 @@ impl Tree {
         }
     }
 
+    fn native_index_bytes(&self) -> usize {
+        #[cfg(target_os = "macos")]
+        {
+            self.identities.capacity() * std::mem::size_of::<(i32, u64)>()
+                + self.hardlinks.capacity() * 48
+                + self
+                    .hardlinks
+                    .values()
+                    .map(|v| v.capacity() * 4)
+                    .sum::<usize>()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            0
+        }
+    }
+
     /// Heap memory held by the tree.
     pub fn memory(&self) -> TreeMemory {
         TreeMemory {
-            nodes: self.nodes.heap_bytes(),
+            nodes: self.nodes.heap_bytes() + self.native_index_bytes(),
             names: self.names.heap_bytes(),
         }
     }

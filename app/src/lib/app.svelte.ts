@@ -182,7 +182,12 @@ export class App implements EngineHost {
     this.volumes = await b.listVolumes();
     this.phase = 'pick';
     // the browser preview opens on a scan of the sample C: so the map is visible right away
-    if (!b.platform.native && this.volumes.length) setTimeout(() => void this.startScan(this.volumes[0].root), 300);
+    const benchmarkRoot = b.platform.benchmarkRoot;
+    if (benchmarkRoot && this.volumes.some(v => v.root === benchmarkRoot)) {
+      void this.startScan(benchmarkRoot);
+    } else if (!b.platform.native && this.volumes.length) {
+      setTimeout(() => void this.startScan(this.volumes[0].root), 300);
+    }
   }
 
   setScheme(s: Scheme) {

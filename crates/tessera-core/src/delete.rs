@@ -691,6 +691,10 @@ pub fn is_protected(path: &Path) -> bool {
 /// root. Costs one lookup per protected folder; used by the layout for the
 /// PROTECTED flag.
 pub(crate) fn protected_nodes(tree: &Tree) -> Vec<u32> {
+    #[cfg(target_os = "macos")]
+    if tree.posix_paths {
+        return crate::scan::darwin::protected_nodes(tree);
+    }
     let root_path = node_path(tree, NodeId::ROOT);
     let root_key = resolved_key(&wide(&root_path));
     let mut out = Vec::new();

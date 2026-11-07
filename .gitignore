@@ -3,3 +3,5 @@
 *.img
 *.pdb
 /.claude/
+
+/macos/build/

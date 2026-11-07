@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/tessera-core", "crates/tessera-cli", "app/src-tauri"]
+members = ["crates/tessera-core", "crates/tessera-cli", "app/src-tauri", "macos/Bridge"]
 
 [workspace.package]
 version = "1.0.1"
