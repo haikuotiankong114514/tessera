@@ -2,6 +2,8 @@
 
 > This branch is **Tessera for Mac**, a performance-first macOS fork of
 > [4zuma/tessera](https://github.com/4zuma/tessera). See the [macOS build, testing, and packaging guide](macos/README.md). The upstream Windows documentation follows.
+>
+> **macOS contributor** · [OpenAI Codex](https://github.com/codex) helped implement the port.
 
 A lightweight, fast disk-space visualizer for Windows: scan a drive, see it
 as a treemap, delete what you don't need.
