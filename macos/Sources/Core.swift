@@ -143,7 +143,24 @@ func reasonText(_ key: String) -> String {
   var undoBatches = [[(original: URL, trash: URL, identity: FileIdentity)]]()
   var lastProgress: UInt64 = 0
   var scanFrames: UInt32 = 0
-  var lastRev: UInt32 = 0
+  private struct CachedScan {
+    let root: URL
+    let core: CoreHandle
+    let status: ScanStatus
+    let monitor: ChangeMonitor
+    let watchID: UInt32
+    let expires: TimeInterval
+    var dirty: Set<URL>
+  }
+
+  private static let cacheLifetime: TimeInterval = 30
+  private static let maxCachedTreeBytes: UInt64 = 160 * 1024 * 1024
+  private static let maxCachedChanges = 128
+  private var cachedScan: CachedScan?
+  private var cacheExpiry: DispatchWorkItem?
+  private var watchID: UInt32?
+  private var refreshBusy = false
+  private var cacheEligible = true
   var pollBusy = false
   var isScanning: Bool { root != nil && !status.done }
   var canDelete: Bool { !selection.isEmpty && !isScanning && !operation }
@@ -165,10 +182,18 @@ func reasonText(_ key: String) -> String {
       [weak self] _ in Task { @MainActor in self?.reloadVolumes() }
     }
     center.addObserver(forName: NSWorkspace.didUnmountNotification, object: nil, queue: .main) {
-      [weak self] _ in Task { @MainActor in self?.reloadVolumes() }
+      [weak self] _ in
+      Task { @MainActor in
+        self?.discardCache()
+        self?.reloadVolumes()
+      }
     }
     center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) {
-      [weak self] _ in Task { @MainActor in self?.rescan() }
+      [weak self] _ in
+      Task { @MainActor in
+        self?.discardCache()
+        self?.rescan()
+      }
     }
     NotificationCenter.default.addObserver(
       forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
@@ -217,64 +242,154 @@ func reasonText(_ key: String) -> String {
       self?.start(url)
     }
   }
-  func start(_ url: URL) {
-    if operation { return }
+  private func discardCache() {
+    cacheExpiry?.cancel()
+    cacheExpiry = nil
+    cachedScan = nil
+  }
+
+  private func takeCache(for url: URL) -> CachedScan? {
+    guard let snapshot = cachedScan, snapshot.root == url else { return nil }
+    discardCache()
+    return snapshot.expires > ProcessInfo.processInfo.systemUptime ? snapshot : nil
+  }
+
+  private func cacheCurrentScan() -> Bool {
+    guard let root, let core = handle, let monitor, let watchID,
+      status.done, status.error == nil, status.treeBytes <= Self.maxCachedTreeBytes,
+      cacheEligible, !refreshBusy, dirty.count <= Self.maxCachedChanges
+    else { return false }
+
+    discardCache()
+    let expires = ProcessInfo.processInfo.systemUptime + Self.cacheLifetime
+    cachedScan = CachedScan(
+      root: root, core: core, status: status, monitor: monitor, watchID: watchID,
+      expires: expires, dirty: dirty)
+    let expiry = DispatchWorkItem { [weak self] in
+      guard let self, self.cachedScan?.expires == expires else { return }
+      self.discardCache()
+    }
+    cacheExpiry = expiry
+    DispatchQueue.main.asyncAfter(deadline: .now() + Self.cacheLifetime, execute: expiry)
+    return true
+  }
+
+  private func receiveChanges(_ urls: [URL], lost: Bool, from id: UInt32) {
+    if watchID == id {
+      dirty.formUnion(urls)
+      if lost || dirty.count > 4096 {
+        // A stream gap disqualifies this snapshot even if a file operation
+        // is currently preventing an immediate rescan.
+        watchID = nil
+        monitor?.stop()
+        monitor = nil
+        if operation {
+          notice = tr("Changes were missed. Rescan to update this view.", "部分文件变更已丢失，请重新扫描。")
+        } else {
+          rescan()
+          notice = tr("Changes were missed. Rescanning this location.", "部分文件变更已丢失，正在重新扫描。")
+        }
+      } else {
+        scheduleDirty()
+      }
+    } else if cachedScan?.watchID == id {
+      cachedScan?.dirty.formUnion(urls)
+      if lost || (cachedScan?.dirty.count ?? 0) > Self.maxCachedChanges {
+        discardCache()
+      }
+    }
+  }
+
+  func start(_ url: URL, force: Bool = false) {
+    guard !operation else { return }
+    let location = url.standardizedFileURL.resolvingSymlinksInPath()
+    guard force || location != root else { return }
+    let restored = force ? nil : takeCache(for: location)
+    if force && cachedScan?.root == location { discardCache() }
+
     timer?.invalidate()
+    timer = nil
     dirtyWork?.cancel()
-    monitor?.stop()
-    handle?.cancel()
+    dirtyWork = nil
+    if force || !cacheCurrentScan() {
+      monitor?.stop()
+      handle?.cancel()
+    }
+    monitor = nil
+    handle = nil
+    watchID = nil
     pollBusy = false
+    refreshBusy = false
+    cacheEligible = true
     generation &+= 1
     let gen = generation
-    root = url.standardizedFileURL.resolvingSymlinksInPath()
+    root = location
     view = 0
-    selection.removeAll()
+    selection = []
     selected = nil
     entries = []
     categories = []
     categoryFilter = nil
+    crumbs = []
+    up = nil
     history = []
     forward = []
     undoBatches = []
-    status = ScanStatus()
-    dirty = []
+    status = restored?.status ?? ScanStatus()
+    dirty = restored?.dirty ?? []
     notice = nil
-    lastProgress = 0
+    lastProgress = status.scanned
     scanFrames = 0
-    lastRev = 0
-    // Install notifications before the scan; changes are held until it finishes.
-    do {
-      monitor = try ChangeMonitor(url: root!) { [weak self] urls, lost in
-        guard let self, self.generation == gen else { return }
-        if lost {
-          self.notice = tr(
-            "Changes were missed. Rescanning to restore consistency.", "文件变更记录不完整，正在重新扫描以恢复一致性。")
-          self.rescan()
-          return
+
+    if let restored {
+      handle = restored.core
+      monitor = restored.monitor
+      watchID = restored.watchID
+      changed()
+      // The retained watcher recorded changes while this location was away.
+      // Reconcile those directories without replacing the scan.
+      flushDirty()
+      poll(restored.core, generation: gen)
+      return
+    }
+
+    watchID = gen
+    // FSEvents opens the root's parent directories while installing the
+    // watcher. The system can block those opens on privacy checks.
+    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+      let watcher = Result {
+        try ChangeMonitor(url: location) { [weak self] urls, lost in
+          self?.receiveChanges(urls, lost: lost, from: gen)
         }
-        for url in urls { self.dirty.insert(url) }
-        if self.dirty.count > 4096 {
-          self.rescan()
-          return
-        }
-        self.scheduleDirty()
       }
-    } catch { notice = tr("Live updates unavailable: ", "实时更新不可用：") + error.localizedDescription }
-    let core = CoreHandle(url: root!)
-    handle = core
-    timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-      Task { @MainActor in self?.poll(core, generation: gen) }
+      DispatchQueue.main.async {
+        guard let self, self.generation == gen else { return }
+        switch watcher {
+        case .success(let monitor):
+          self.monitor = monitor
+        case .failure(let error):
+          self.watchID = nil
+          self.notice = tr("Live updates unavailable: ", "实时更新不可用：") + error.localizedDescription
+        }
+        let core = CoreHandle(url: location)
+        self.handle = core
+        self.timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+          Task { @MainActor in self?.poll(core, generation: gen) }
+        }
+        self.changed()
+      }
     }
     changed()
   }
   func poll(_ core: CoreHandle, generation gen: UInt32) {
-    guard !pollBusy else { return }
+    guard generation == gen, !pollBusy else { return }
     pollBusy = true
     worker.async { [weak self] in
       let result = try? decode(ScanStatus.self, ts_status(core.pointer))
       DispatchQueue.main.async {
-        guard let self, self.generation == gen, let result else { return }
+        guard let self, self.generation == gen else { return }
         self.pollBusy = false
+        guard let result else { return }
         self.status = result
         if let error = result.error { self.notice = reasonText(error) }
         if result.scanned != self.lastProgress || result.done {
@@ -287,19 +402,35 @@ func reasonText(_ key: String) -> String {
           self.timer = nil
           self.refreshNav()
           self.loadList(reset: true)
-          self.flushDirty()
+          self.refreshSelection()
+          self.scheduleDirty()
         }
       }
     }
   }
-  func stop() { handle?.cancel() }
-  func rescan() { if let root { start(root) } }
+  func stop() {
+    if let handle {
+      handle.cancel()
+    } else if isScanning {
+      generation &+= 1
+      watchID = nil
+      status.done = true
+      status.error = "cancelled"
+      notice = reasonText("cancelled")
+      changed()
+    }
+  }
+  func rescan() { if let root { start(root, force: true) } }
   func close() {
+    generation &+= 1
+    discardCache()
     timer?.invalidate()
     timer = nil
     dirtyWork?.cancel()
+    dirtyWork = nil
     monitor?.stop()
     monitor = nil
+    watchID = nil
     handle?.cancel()
     handle = nil
     root = nil
@@ -346,16 +477,22 @@ func reasonText(_ key: String) -> String {
     navigate(id, record: false)
   }
   func select(_ ids: [UInt32]) {
-    selection = Set(ids.filter { $0 < 0x8000_0000 })
-    selected = nil
+    let next = Set(ids.filter { $0 < 0x8000_0000 })
+    guard next != selection else { return }
+    selection = next
+    if selected?.id != next.min() { selected = nil }
     changed()
-    guard let id = selection.first, let core = handle else { return }
+    refreshSelection()
+  }
+
+  private func refreshSelection() {
+    guard let id = selection.min(), let core = handle else { return }
     let gen = generation
     worker.async { [weak self] in
       let result = try? decode(Entry.self, ts_details(core.pointer, id))
       DispatchQueue.main.async {
-        guard let self, self.generation == gen, self.selection.contains(id) else { return }
-        self.selected = result
+        guard let self, self.generation == gen, self.selection.min() == id else { return }
+        if self.selected != result { self.selected = result }
       }
     }
   }
@@ -391,7 +528,7 @@ func reasonText(_ key: String) -> String {
     }
   }
   func scheduleDirty() {
-    guard !isScanning, dirtyWork == nil, !dirty.isEmpty else { return }
+    guard !isScanning, !refreshBusy, dirtyWork == nil, !dirty.isEmpty else { return }
     let work = DispatchWorkItem { [weak self] in self?.flushDirty() }
     dirtyWork = work
     DispatchQueue.main.asyncAfter(deadline: .now() + (active ? 0.5 : 2), execute: work)
@@ -399,7 +536,8 @@ func reasonText(_ key: String) -> String {
   func flushDirty() {
     dirtyWork?.cancel()
     dirtyWork = nil
-    guard !isScanning, !dirty.isEmpty, let core = handle else { return }
+    guard !isScanning, !refreshBusy, !dirty.isEmpty, let core = handle else { return }
+    refreshBusy = true
     let urls = dirty
     dirty = []
     let gen = generation
@@ -422,17 +560,13 @@ func reasonText(_ key: String) -> String {
       }
       DispatchQueue.main.async {
         guard let self, self.generation == gen else { return }
-        if changed {
-          self.lastRev &+= 1
-          self.poll(core, generation: gen)
-          self.changed()
-          self.loadList(reset: true)
-          self.refreshNav()
-          self.select(Array(self.selection))
-        }
+        self.refreshBusy = false
+        if changed { self.poll(core, generation: gen) }
         if let failure {
+          self.cacheEligible = false
           self.notice = tr("Some changes could not be read: ", "部分变更暂时无法读取：") + failure
         }
+        self.scheduleDirty()
       }
     }
   }

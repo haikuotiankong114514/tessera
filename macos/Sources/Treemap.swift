@@ -50,8 +50,9 @@ struct Treemap: NSViewRepresentable {
         Int(accent.blueComponent * 255))
       var props: [String: Any] = [
         "generation": store.generation, "view": store.view, "logical": store.logical,
-        "scanning": store.isScanning, "rev": store.scanFrames &+ store.lastRev &+ store.status.rev,
-        "scheme": dark ? "dark" : "light", "accent": hex, "selection": Array(store.selection),
+        "scanning": store.isScanning, "ready": store.handle != nil,
+        "rev": store.scanFrames &+ store.status.rev,
+        "scheme": dark ? "dark" : "light", "accent": hex, "selection": store.selection.sorted(),
         "reduced": NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
         "lang": Locale.preferredLanguages.first?.hasPrefix("zh") == true ? "zh-CN" : "en",
         "active": store.active && !(web.window?.isMiniaturized ?? false),
@@ -135,7 +136,26 @@ struct Treemap: NSViewRepresentable {
         finish(urlSchemeTask, key: key, data: nil, mime: "text/plain", code: 404)
         return
       }
-      if url.path == "/layout" {
+      if url.path == "/tile-name" {
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        func value(_ key: String) -> String { items.first { $0.name == key }?.value ?? "" }
+        guard let generation = UInt32(value("generation")), generation == store.generation,
+          let core = store.handle, let id = UInt32(value("id")), id < 0x8000_0000
+        else {
+          finish(urlSchemeTask, key: key, data: nil, mime: "text/plain", code: 404)
+          return
+        }
+        store.worker.async { [weak self] in
+          let name = unpack(ts_tile_name(core.pointer, id))
+          DispatchQueue.main.async {
+            guard let self, let task = self.tasks[key] else { return }
+            let valid = self.store.generation == generation && !name.isEmpty
+            self.finish(
+              task, key: key, data: valid ? name : nil, mime: "text/plain; charset=utf-8",
+              code: valid ? 200 : 404)
+          }
+        }
+      } else if url.path == "/layout" {
         let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
         func value(_ key: String) -> String { items.first { $0.name == key }?.value ?? "" }
         guard let generation = UInt32(value("generation")), generation == store.generation,

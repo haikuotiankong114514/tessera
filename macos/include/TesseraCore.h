@@ -10,6 +10,7 @@ void ts_release(void *session);
 void ts_free(TSBuffer buffer);
 TSBuffer ts_status(const void *session);
 TSBuffer ts_layout(const void *session, uint32_t view, float width, float height, bool logical, bool force);
+TSBuffer ts_tile_name(const void *session, uint32_t id);
 TSBuffer ts_details(const void *session, uint32_t id);
 TSBuffer ts_nav(const void *session, uint32_t id, bool logical);
 TSBuffer ts_categories(const void *session, uint32_t id, bool logical);

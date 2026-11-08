@@ -2,10 +2,12 @@ import AppKit
 import Foundation
 
 @main struct NativeTests {
-  @MainActor static func wait(_ condition: () -> Bool, seconds: Double = 10) throws {
+  @MainActor static func wait(_ condition: () -> Bool, seconds: Double = 10, line: UInt = #line)
+    throws
+  {
     let deadline = Date().addingTimeInterval(seconds)
     while !condition() {
-      if Date() > deadline { throw NSError(domain: "TestTimeout", code: 1) }
+      if Date() > deadline { throw NSError(domain: "TestTimeout", code: Int(line)) }
       RunLoop.current.run(until: Date().addingTimeInterval(0.01))
     }
   }
@@ -23,6 +25,9 @@ import Foundation
     let list = try decode([Entry].self, ts_children(core.pointer, 0, 0, false))
     assert(list.count == 1)
     let file = list[0]
+    assert(
+      String(decoding: unpack(ts_tile_name(core.pointer, file.id)), as: UTF8.self) == file.name)
+    assert(unpack(ts_tile_name(core.pointer, UInt32.max)).isEmpty)
     let layout = unpack(ts_layout(core.pointer, 0, 800, 600, false, false))
     assert(layout.count >= 32)
     assert(Array(layout.prefix(4)) == [84, 83, 82, 76])
@@ -84,6 +89,31 @@ import Foundation
     touch.refresh()
     assert(touch.buttons["stop"]?.isEnabled == false)
     store.close()
+
+    let cacheStore = Store()
+    let first = root.appendingPathComponent("first-location", isDirectory: true)
+    let other = root.appendingPathComponent("second-location", isDirectory: true)
+    try fm.createDirectory(at: first, withIntermediateDirectories: false)
+    try fm.createDirectory(at: other, withIntermediateDirectories: false)
+    try Data([1]).write(to: first.appendingPathComponent("initial.txt"))
+    cacheStore.start(first)
+    try wait { cacheStore.status.done }
+    let firstScan = cacheStore.handle!
+    cacheStore.start(first)
+    assert(
+      cacheStore.handle === firstScan, "clicking the active location must not restart its scan")
+    cacheStore.start(other)
+    try wait { cacheStore.status.done }
+    try Data([8, 9]).write(to: first.appendingPathComponent("added-while-away.txt"))
+    cacheStore.start(first)
+    assert(
+      cacheStore.handle === firstScan && cacheStore.status.done,
+      "switching back should reuse the scan")
+    try wait { cacheStore.status.files == 2 }
+    cacheStore.rescan()
+    assert(cacheStore.handle !== firstScan, "manual rescan must start a fresh scan")
+    try wait { cacheStore.status.done }
+    cacheStore.close()
     print(
       "Native tests passed: C ABI, binary layout, unchanged-layout suppression, identity replacement, descriptor-relative delete, elapsed time, Trash + Undo, Touch Bar state."
     )

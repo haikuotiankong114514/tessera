@@ -31,6 +31,18 @@ import WebKit
       print("WebKit not ready: \(String(describing:store.notice)); \(String(describing:web.url))")
       throw error
     }
+    let file = try decode([Entry].self, ts_children(store.handle!.pointer, 0, 0, false))[0]
+    var hoverName: String?
+    web.callAsyncJavaScript(
+      "return (await fetch(url)).text()",
+      arguments: [
+        "url": "tessera://app/tile-name?generation=\(store.generation)&id=\(file.id)"
+      ], in: nil, in: .page
+    ) { result in
+      if case .success(let value) = result { hoverName = value as? String }
+    }
+    try wait { hoverName != nil }
+    assert(hoverName == file.name)
     var stats: [String: Any]?
     var resultError: String?
     RunLoop.current.run(until: Date().addingTimeInterval(0.8))

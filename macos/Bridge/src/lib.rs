@@ -230,6 +230,21 @@ pub unsafe extern "C" fn ts_layout(
     previous.extend_from_slice(&data);
     Buffer::new(data)
 }
+/// # Safety
+/// `h` is null or a live handle returned by `ts_create`, not concurrently released.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_tile_name(h: *const std::ffi::c_void, id: u32) -> Buffer {
+    let Some(s) = (unsafe { session(h.cast()) }) else {
+        return Buffer::new(Vec::new());
+    };
+    let t = s.tree.read().unwrap_or_else(|e| e.into_inner());
+    let id = NodeId(id);
+    if id.index() >= t.len() || t.is_deleted(id) {
+        return Buffer::new(Vec::new());
+    }
+    Buffer::new(t.name_lossy(id).into_bytes())
+}
+
 fn details(s: &Session, id: NodeId) -> Value {
     let Ok(_policy) = scan::darwin::NoMaterialize::new() else {
         return Value::Null;
@@ -377,9 +392,25 @@ pub unsafe extern "C" fn ts_watch_create(
     callback: unsafe extern "C" fn(*const u8, usize, u32, *mut std::ffi::c_void),
     context: *mut std::ffi::c_void,
 ) -> *mut std::ffi::c_void {
-    let path = Path::new(OsStr::from_bytes(unsafe { bytes(path, len) }));
+    let logical_root = Path::new(OsStr::from_bytes(unsafe { bytes(path, len) })).to_path_buf();
+    let Ok(root) = std::fs::canonicalize(&logical_root) else {
+        return std::ptr::null_mut();
+    };
+    let physical_root = root.clone();
     let context = context as usize;
-    match tessera_core::watch::darwin::Stream::new(path, move |path, flags| {
+    match tessera_core::watch::darwin::Stream::new(&root, move |path, flags| {
+        let logical_path;
+        let path = if physical_root != logical_root {
+            match path.strip_prefix(&physical_root) {
+                Ok(relative) => {
+                    logical_path = logical_root.join(relative);
+                    &logical_path
+                }
+                Err(_) => path,
+            }
+        } else {
+            path
+        };
         let bytes = path.as_os_str().as_bytes();
         unsafe {
             callback(
