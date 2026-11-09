@@ -404,7 +404,7 @@ struct RenderStatus: Decodable {
         }
         let core = CoreHandle(url: location)
         self.handle = core
-        self.timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+        self.timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
           Task { @MainActor in self?.poll(core, generation: gen) }
         }
         self.changed()

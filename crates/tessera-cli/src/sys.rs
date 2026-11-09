@@ -110,6 +110,15 @@ pub fn memory() -> Memory {
 
 #[cfg(target_os = "macos")]
 pub fn cpu_time() -> Duration {
-    let info = usage();
-    Duration::from_nanos(info.ri_user_time.saturating_add(info.ri_system_time))
+    // proc_pid_rusage CPU counters use Mach ticks on Apple Silicon.
+    // getrusage exposes timeval units on both supported architectures.
+    let mut info: libc::rusage = unsafe { std::mem::zeroed() };
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut info) } != 0 {
+        return Duration::ZERO;
+    }
+    let user = Duration::from_secs(info.ru_utime.tv_sec.max(0) as u64)
+        + Duration::from_micros(info.ru_utime.tv_usec.max(0) as u64);
+    let system = Duration::from_secs(info.ru_stime.tv_sec.max(0) as u64)
+        + Duration::from_micros(info.ru_stime.tv_usec.max(0) as u64);
+    user + system
 }

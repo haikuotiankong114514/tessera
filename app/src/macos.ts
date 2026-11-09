@@ -29,7 +29,7 @@ function post(action: string, extra: object = {}) { win.webkit?.messageHandlers.
 function request(kind: MotionKind = 'update') { pending = kind; if (!inFlight) void pump(); }
 async function pump() {
   if (inFlight || !state || !pending || disposed || !state.active || !state.ready || !engine.W || !engine.H) return;
-  const kind = state.scanning ? 'instant' : pending; pending = null; inFlight = true;
+  const kind = pending; pending = null; inFlight = true;
   const capture = state; const serial = layoutSerial;
   try {
     const started = performance.now();
@@ -166,7 +166,7 @@ canvas.addEventListener('keydown',e=>{
 });
 const appearance=()=>{ if(!state)return;host.theme=makeTheme(state.scheme,{light:state.accent,dark:state.accent});host.reduced=state.reduced;document.documentElement.style.colorScheme=state.scheme;engine.painter.reset();engine.invalidate(); };
 win.tessera={
-  update(next: State){const old=state;state=next;host.sel=new Set(next.selection);host.filter=next.filter ?? null;
+  update(next: State){const old=state;state=next;host.scanning=next.scanning && next.active;host.sel=new Set(next.selection);host.filter=next.filter ?? null;
     if (old?.lang !== next.lang) setLang(next.lang);
     const changed=!old||old.generation!==next.generation||old.view!==next.view||old.logical!==next.logical;
     if (changed) {
@@ -179,7 +179,7 @@ win.tessera={
       message.textContent = next.scanning ? (next.lang === 'zh-CN' ? '正在发现文件…' : 'Discovering files…') : '';
     }
     if(!old || old.scheme!==next.scheme || old.accent!==next.accent || old.reduced!==next.reduced)appearance();
-    if(changed || !old || old.rev!==next.rev || old.scanning!==next.scanning || (!old.ready && next.ready) || (!old.active&&next.active))request('instant');else engine.kick();
+    if(changed || !old || old.rev!==next.rev || old.scanning!==next.scanning || (!old.ready && next.ready) || (!old.active&&next.active))request(changed ? 'instant' : 'live');else engine.kick();
   },
   measure(){return { ...metrics, stats: {...engine.stats}, webgl:engine.stats.gpu, width:innerWidth,height:innerHeight,dpr:devicePixelRatio,userAgent:navigator.userAgent };},
   dispose(){disposed=true;layoutSerial++;clearHover();observer.disconnect();engine.destroy();},
