@@ -179,9 +179,10 @@ win.tessera={
       message.textContent = next.scanning ? (next.lang === 'zh-CN' ? '正在发现文件…' : 'Discovering files…') : '';
     }
     if(!old || old.scheme!==next.scheme || old.accent!==next.accent || old.reduced!==next.reduced)appearance();
-    if(changed || !old || old.rev!==next.rev || old.scanning!==next.scanning || (!old.ready && next.ready) || (!old.active&&next.active))request(changed?'instant':'live');else engine.kick();
+    if(changed || !old || old.rev!==next.rev || old.scanning!==next.scanning || (!old.ready && next.ready) || (!old.active&&next.active))request('instant');else engine.kick();
   },
   measure(){return { ...metrics, stats: {...engine.stats}, webgl:engine.stats.gpu, width:innerWidth,height:innerHeight,dpr:devicePixelRatio,userAgent:navigator.userAgent };},
   dispose(){disposed=true;layoutSerial++;clearHover();observer.disconnect();engine.destroy();},
 };
+engine.onStats = stats => post('render-status', { stats: { ...stats } });
 post('ready');

@@ -114,6 +114,17 @@ import Foundation
     assert(cacheStore.handle !== firstScan, "manual rescan must start a fresh scan")
     try wait { cacheStore.status.done }
     cacheStore.close()
+    let preferencesName = "Tessera-access-tests-" + UUID().uuidString
+    let preferences = UserDefaults(suiteName: preferencesName)!
+    defer { preferences.removePersistentDomain(forName: preferencesName) }
+    let setupStore = Store(requireAccessSetup: true, preferences: preferences)
+    assert(setupStore.accessSetupPresented)
+    setupStore.start(first)
+    assert(setupStore.handle == nil, "access setup must precede the first scan")
+    setupStore.finishAccessSetup()
+    try wait { setupStore.status.done }
+    assert(!setupStore.accessSetupPresented)
+    setupStore.close()
     print(
       "Native tests passed: C ABI, binary layout, unchanged-layout suppression, identity replacement, descriptor-relative delete, elapsed time, Trash + Undo, Touch Bar state."
     )

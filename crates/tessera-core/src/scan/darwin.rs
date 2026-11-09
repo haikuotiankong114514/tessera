@@ -691,7 +691,29 @@ pub fn refresh(tree: &SharedTree, directory: &Path) -> Result<bool> {
     let mut link_groups = HashSet::new();
     while let Some((parent, path)) = pending.pop() {
         let actual = canonical_root.join(path.strip_prefix(&root).unwrap_or(Path::new("")));
-        let snapshot = shallow(&actual, &root)?;
+        let snapshot = match shallow(&actual, &root) {
+            Ok(snapshot) => snapshot,
+            Err(Error::Io(error))
+                if parent != NodeId::ROOT
+                    && matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                    ) =>
+            {
+                // Directory events can arrive after the directory was removed.
+                // Its parent's listing is the authoritative source of deletion.
+                let ancestor = tree
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .node(parent)
+                    .parent;
+                if let Some(path) = path.parent() {
+                    pending.push((ancestor, path.to_path_buf()));
+                }
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let mut t = tree.write().unwrap_or_else(|e| e.into_inner());
         let old: Vec<_> = t.children(parent).collect();
         let mut names: HashMap<Vec<u8>, NodeId> =

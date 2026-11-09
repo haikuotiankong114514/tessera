@@ -111,6 +111,11 @@ struct Treemap: NSViewRepresentable {
       }
       guard (body["generation"] as? NSNumber)?.uint32Value == store.generation else { return }
       switch action {
+      case "render-status":
+        if let stats = body["stats"], let data = try? JSONSerialization.data(withJSONObject: stats)
+        {
+          store.renderStatus = try? JSONDecoder().decode(RenderStatus.self, from: data)
+        }
       case "select":
         store.select((body["ids"] as? [NSNumber] ?? []).prefix(100_000).map(\.uint32Value))
       case "navigate": if let id = (body["id"] as? NSNumber)?.uint32Value { store.navigate(id) }

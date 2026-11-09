@@ -485,7 +485,7 @@ export class TreemapEngine {
     if (going) this.kick();
     else this.frames.length = 0;
     this.stats.fps = this.frames.length;
-    if (this.stats.busy !== going || now - this.statsAt > 250) {
+    if (this.statsAt === 0 || this.stats.busy !== going || now - this.statsAt > 250) {
       this.stats.busy = going;
       this.statsAt = now;
       this.onStats?.(this.stats);

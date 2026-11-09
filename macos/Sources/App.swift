@@ -3,7 +3,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 @main struct TesseraApp: App {
-  @StateObject private var store = Store()
+  @StateObject private var store = Store(requireAccessSetup: true)
   @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
   var body: some Scene {
     Window("Tessera for Mac", id: "main") {
@@ -18,6 +18,9 @@ import UniformTypeIdentifiers
           {
             store.start(URL(fileURLWithPath: CommandLine.arguments[index + 1]))
           }
+        }
+        .sheet(isPresented: $store.accessSetupPresented) {
+          AccessSetup(store: store)
         }
         .onDisappear { store.close() }
     }.defaultSize(width: 1160, height: 730)
@@ -67,7 +70,8 @@ import UniformTypeIdentifiers
           Toggle(tr("Show Inspector", "显示检查器"), isOn: $store.inspectorVisible).keyboardShortcut("i")
         }
         CommandGroup(replacing: .help) {
-          Button(tr("Disk Access Help", "磁盘访问权限帮助")) { store.showPermissionHelp() }
+          Toggle(tr("Show Rendering Diagnostics", "显示渲染诊断"), isOn: $store.showRenderStatus)
+          Button(tr("Disk Access Setup…", "磁盘访问设置…")) { store.accessSetupPresented = true }
           Button(tr("Project on GitHub", "GitHub 项目")) {
             NSWorkspace.shared.open(
               URL(string: "https://github.com/haikuotiankong114514/tessera/tree/macos")!)
@@ -223,6 +227,12 @@ struct Content: View {
                   ? "checkmark.circle" : "exclamationmark.circle"
               ).foregroundStyle(.secondary)
               Text(store.status.error == nil ? tr("Live", "实时更新") : tr("Partial results", "部分结果"))
+            }
+            if store.showRenderStatus, let stats = store.renderStatus {
+              Text(
+                "\(stats.gpu ? "WebGL2 · GPU" : "Canvas 2D") · \(stats.frameMs, specifier: "%.1f") ms · \(stats.rects) tiles"
+              )
+              .monospacedDigit()
             }
             Text(
               "\(store.status.files.formatted()) \(tr("files","个文件")) · \(store.status.dirs.formatted()) \(tr("folders","个文件夹"))"
@@ -399,5 +409,56 @@ struct Inspector: View {
       Text(title).font(.caption).foregroundStyle(.secondary)
       Text(value).font(.callout.monospacedDigit()).textSelection(.enabled)
     }
+  }
+}
+
+struct AccessSetup: View {
+  @ObservedObject var store: Store
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 18) {
+      Label(tr("Set Up Disk Access", "设置磁盘访问权限"), systemImage: "externaldrive.badge.checkmark")
+        .font(.title2)
+      Text(
+        tr(
+          "Choose your access scope before the first scan. macOS controls access to Documents, Downloads, Pictures and other apps’ data.",
+          "首次扫描前请设置访问范围。macOS 会保护文稿、下载、图片和其他应用的数据。"))
+      GroupBox {
+        VStack(alignment: .leading, spacing: 10) {
+          Text(tr("For a whole-disk scan", "扫描整个磁盘")).font(.headline)
+          Text(
+            tr(
+              "Open System Settings → Privacy & Security → Full Disk Access, then add and enable Tessera for Mac. macOS may require you to reopen Tessera.",
+              "打开系统设置 → 隐私与安全 → 完全磁盘访问权限，添加并启用 Tessera for Mac。系统可能要求重新打开应用。"))
+          Button(tr("Open System Settings", "打开系统设置")) { store.showPermissionHelp() }
+        }.frame(maxWidth: .infinity, alignment: .leading).padding(6)
+      }
+      GroupBox {
+        VStack(alignment: .leading, spacing: 10) {
+          Text(tr("For selected folders", "仅扫描所选文件夹")).font(.headline)
+          Text(
+            tr(
+              "Select the folders you want to analyze in one chooser. Access to additional protected data may still require macOS approval.",
+              "可以在一个选择器中批量选择要分析的文件夹。额外的受保护数据仍可能需要系统批准。"))
+          Button(tr("Choose Folders…", "选择文件夹…")) { store.selectAccessibleFolders() }
+            .disabled(store.accessSetupBusy)
+          if store.grantedFolderCount > 0 {
+            Text(
+              tr(
+                "\(store.grantedFolderCount) folders selected",
+                "已选择 \(store.grantedFolderCount) 个文件夹")
+            ).font(.caption).foregroundStyle(.secondary)
+          }
+        }.frame(maxWidth: .infinity, alignment: .leading).padding(6)
+      }
+      HStack {
+        Spacer()
+        Button(tr("Continue", "继续")) { store.finishAccessSetup() }
+          .buttonStyle(.borderedProminent).disabled(store.accessSetupBusy)
+      }
+    }
+    .padding(24)
+    .frame(width: 540)
+    .interactiveDismissDisabled()
   }
 }

@@ -8,9 +8,11 @@ Tessera targets **macOS 14 or later** on **Apple Silicon and Intel**. The macOS 
 
 ## Using Tessera
 
+- Complete Disk Access Setup before the first scan. For a whole-disk scan, enable Full Disk Access in System Settings. You can also select several folders in one chooser.
 - Choose a disk in the sidebar or press `⌘O` to scan a folder. Double-click a folder tile to drill down, or use the file list to browse by size.
 - Toggle between **Allocated** and **Logical** size and inspect a file's details or show it in Finder. APFS clones, snapshots, shared space, and unreadable directories can make scan totals differ from volume usage.
-- Press `⌘Delete` to move the selection to Trash and `⌘Z` to undo the move during the current scan. Disk Access Help is available from the Help menu.
+- Press `⌘Delete` to move the selection to Trash and `⌘Z` to undo the move during the current scan. Disk Access Setup is available from the Help menu.
+- Switching back within 30 seconds can reuse one completed scan, while its watcher reconciles small changes. Manual Rescan always starts fresh.
 - On Macs with a Touch Bar, controls change as you choose a location, scan, browse, and select files.
 
 ## How the port works

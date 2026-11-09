@@ -110,7 +110,20 @@ func reasonText(_ key: String) -> String {
   }
 }
 
+struct RenderStatus: Decodable {
+  let gpu: Bool
+  let frameMs: Double
+  let fps: Int
+  let rects: Int
+  let busy: Bool
+}
+
 @MainActor final class Store: NSObject, ObservableObject {
+  @Published var showRenderStatus = false
+  @Published var renderStatus: RenderStatus?
+  @Published var accessSetupPresented = false
+  @Published var accessSetupBusy = false
+  @Published var grantedFolderCount = 0
   @Published var root: URL?
   @Published var status = ScanStatus()
   @Published var generation: UInt32 = 0
@@ -165,8 +178,21 @@ func reasonText(_ key: String) -> String {
   var isScanning: Bool { root != nil && !status.done }
   var canDelete: Bool { !selection.isEmpty && !isScanning && !operation }
   var canUndo: Bool { !undoBatches.isEmpty && !operation && !isScanning }
-  override init() {
+  private let requireAccessSetup: Bool
+  private let preferences: UserDefaults
+  private var pendingScan: URL?
+  private var grantedFolders: [URL] = []
+  private static let accessSetupKey = "tessera.accessSetupCompleted.v1"
+  private static let folderBookmarksKey = "tessera.grantedFolders.v1"
+
+  init(requireAccessSetup: Bool = false, preferences: UserDefaults = .standard) {
+    self.requireAccessSetup = requireAccessSetup
+    self.preferences = preferences
     super.init()
+    if requireAccessSetup {
+      restoreFolderAccess()
+      accessSetupPresented = !preferences.bool(forKey: Self.accessSetupKey)
+    }
     reloadVolumes()
     NotificationCenter.default.addObserver(
       forName: NSWorkspace.didMountNotification, object: nil, queue: .main
@@ -302,6 +328,11 @@ func reasonText(_ key: String) -> String {
 
   func start(_ url: URL, force: Bool = false) {
     guard !operation else { return }
+    if requireAccessSetup && !preferences.bool(forKey: Self.accessSetupKey) {
+      pendingScan = url
+      accessSetupPresented = true
+      return
+    }
     let location = url.standardizedFileURL.resolvingSymlinksInPath()
     guard force || location != root else { return }
     let restored = force ? nil : takeCache(for: location)
@@ -600,6 +631,65 @@ func reasonText(_ key: String) -> String {
       }
     }
   }
+  func finishAccessSetup() {
+    guard !accessSetupBusy else { return }
+    preferences.set(true, forKey: Self.accessSetupKey)
+    accessSetupPresented = false
+    if let pending = pendingScan {
+      pendingScan = nil
+      start(pending)
+    }
+  }
+
+  func selectAccessibleFolders() {
+    let panel = NSOpenPanel()
+    panel.canChooseDirectories = true
+    panel.canChooseFiles = false
+    panel.allowsMultipleSelection = true
+    panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
+    panel.prompt = tr("Allow Selected Folders", "允许所选文件夹")
+    panel.message = tr(
+      "Select the folders you want to analyze. You can select Documents, Downloads, Desktop and Pictures together.",
+      "选择需要分析的文件夹，可同时选中文稿、下载、桌面和图片。")
+    accessSetupBusy = true
+    panel.begin { [weak self] response in
+      guard let self else { return }
+      self.accessSetupBusy = false
+      guard response == .OK else { return }
+      var bookmarks = self.preferences.array(forKey: Self.folderBookmarksKey) as? [Data] ?? []
+      for url in panel.urls where !self.grantedFolders.contains(url) {
+        _ = url.startAccessingSecurityScopedResource()
+        self.grantedFolders.append(url)
+        do {
+          bookmarks.append(
+            try url.bookmarkData(
+              options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil))
+        } catch {
+          self.notice = tr(
+            "Folder access is available for this session. Select it again if macOS asks after restarting.",
+            "当前会话已允许访问。重启后若系统询问，请重新选择该文件夹。")
+        }
+      }
+      self.preferences.set(bookmarks, forKey: Self.folderBookmarksKey)
+      self.grantedFolderCount = self.grantedFolders.count
+    }
+  }
+
+  private func restoreFolderAccess() {
+    for bookmark in preferences.array(forKey: Self.folderBookmarksKey) as? [Data] ?? [] {
+      var stale = false
+      if let url = try? URL(
+        resolvingBookmarkData: bookmark, options: [.withSecurityScope, .withoutUI],
+        relativeTo: nil, bookmarkDataIsStale: &stale),
+        !stale, !grantedFolders.contains(url)
+      {
+        _ = url.startAccessingSecurityScopedResource()
+        grantedFolders.append(url)
+      }
+    }
+    grantedFolderCount = grantedFolders.count
+  }
+
   func showPermissionHelp() {
     NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/System Settings.app"))
     notice = tr(

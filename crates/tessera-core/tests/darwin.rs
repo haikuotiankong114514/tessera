@@ -281,3 +281,17 @@ fn deleting_a_hardlink_owners_parent_transfers_its_bytes() {
     assert_eq!(t.node(NodeId::ROOT).logical, 10);
     t.check_invariants().unwrap();
 }
+
+#[test]
+fn a_late_event_for_a_removed_directory_reconciles_its_parent() {
+    let fixture = Fixture::new();
+    let folder = fixture.0.join("removed");
+    fs::create_dir(&folder).unwrap();
+    fs::write(folder.join("file"), b"temporary").unwrap();
+    let tree = run(&fixture.0, 1);
+    fs::remove_dir_all(&folder).unwrap();
+    assert!(scan::darwin::refresh(&tree, &folder).unwrap());
+    let tree = tree.read().unwrap();
+    assert!(tree.lookup_relative(b"removed").is_none());
+    tree.check_invariants().unwrap();
+}
